@@ -11,18 +11,19 @@
   <div id="theater">
   	<video id="video" hidden src="https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.480p.vp9.webm" controls></video>
   	<br/>
-  	    <div class="page pinch-zoom-parent">
 
-  	<canvas id="canvas" class="pinch-zoom"></canvas>
-  	    </div>
-
+<pinch-zoom>
+  	<canvas id="canvas" width="768" height="432"> </canvas>
+</pinch-zoom>
   	</div>
 
   	<div id="my-controls" onclick="updateSpeed()">
   		<input  type="radio" id="double" name="speed" value="2.0">
-  		<label for="double">x2</label><br>
+  		<label for="double">x2</label>
+  		<!-- <br> -->
   		<input type="radio" id="normal" name="speed" value="1.0" checked>
-  		<label for="normal">x1</label><br>
+  		<label for="normal">x1</label>
+  		<!-- <br> -->
   		<input type="radio" id="half" name="speed" value="0.5" >
   		<label for="half">x0.5</label>
   	</div>

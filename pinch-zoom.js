@@ -1,873 +1,505 @@
-(function (global, factory) {
-    if (typeof define === "function" && define.amd) {
-        define(['exports'], factory);
-    } else if (typeof exports !== "undefined") {
-        factory(exports);
-    } else {
-        var mod = {
-            exports: {}
-        };
-        factory(mod.exports);
-        global.PinchZoom = mod.exports;
-    }
-})(this, function (exports) {
+var PinchZoom = (function () {
     'use strict';
 
-    Object.defineProperty(exports, "__esModule", {
-        value: true
-    });
-    /*
-    
-        PinchZoom.js
-        Copyright (c) Manuel Stofer 2013 - today
-    
-        Author: Manuel Stofer (mst@rtp.ch)
-        Version: 2.2.0
-    
-        Permission is hereby granted, free of charge, to any person obtaining a copy
-        of this software and associated documentation files (the "Software"), to deal
-        in the Software without restriction, including without limitation the rights
-        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-        copies of the Software, and to permit persons to whom the Software is
-        furnished to do so, subject to the following conditions:
-    
-        The above copyright notice and this permission notice shall be included in
-        all copies or substantial portions of the Software.
-    
-        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-        THE SOFTWARE.
-    
-    */
-
-    // polyfills
-    if (typeof Object.assign != 'function') {
-        // Must be writable: true, enumerable: false, configurable: true
-        Object.defineProperty(Object, "assign", {
-            value: function assign(target, varArgs) {
-                // .length of function is 2
-                if (target == null) {
-                    // TypeError if undefined or null
-                    throw new TypeError('Cannot convert undefined or null to object');
-                }
-
-                var to = Object(target);
-
-                for (var index = 1; index < arguments.length; index++) {
-                    var nextSource = arguments[index];
-
-                    if (nextSource != null) {
-                        // Skip over if undefined or null
-                        for (var nextKey in nextSource) {
-                            // Avoid bugs when hasOwnProperty is shadowed
-                            if (Object.prototype.hasOwnProperty.call(nextSource, nextKey)) {
-                                to[nextKey] = nextSource[nextKey];
-                            }
-                        }
-                    }
-                }
-                return to;
-            },
-            writable: true,
-            configurable: true
-        });
-    }
-
-    if (typeof Array.from != 'function') {
-        Array.from = function (object) {
-            return [].slice.call(object);
-        };
-    }
-
-    // utils
-    var buildElement = function buildElement(str) {
-        // empty string as title argument required by IE and Edge
-        var tmp = document.implementation.createHTMLDocument('');
-        tmp.body.innerHTML = str;
-        return Array.from(tmp.body.children)[0];
-    };
-
-    var triggerEvent = function triggerEvent(el, name) {
-        var event = document.createEvent('HTMLEvents');
-        event.initEvent(name, true, false);
-        el.dispatchEvent(event);
-    };
-
-    var definePinchZoom = function definePinchZoom() {
-
+    class Pointer {
+        constructor(nativePointer) {
+            /** Unique ID for this pointer */
+            this.id = -1;
+            this.nativePointer = nativePointer;
+            this.pageX = nativePointer.pageX;
+            this.pageY = nativePointer.pageY;
+            this.clientX = nativePointer.clientX;
+            this.clientY = nativePointer.clientY;
+            if (self.Touch && nativePointer instanceof Touch) {
+                this.id = nativePointer.identifier;
+            }
+            else if (isPointerEvent(nativePointer)) { // is PointerEvent
+                this.id = nativePointer.pointerId;
+            }
+        }
         /**
-         * Pinch zoom
-         * @param el
-         * @param options
-         * @constructor
+         * Returns an expanded set of Pointers for high-resolution inputs.
          */
-        var PinchZoom = function PinchZoom(el, options) {
-            this.el = el;
-            this.zoomFactor = 1;
-            this.lastScale = 1;
-            this.offset = {
-                x: 0,
-                y: 0
-            };
-            this.initialOffset = {
-                x: 0,
-                y: 0
-            };
-            this.options = Object.assign({}, this.defaults, options);
-            this.setupMarkup();
-            this.bindEvents();
-            this.update();
-
-            // The image may already be loaded when PinchZoom is initialized,
-            // and then the load event (which trigger update) will never fire.
-            if (this.isImageLoaded(this.el)) {
-                this.updateAspectRatio();
-                this.setupInitialOffset();
+        getCoalesced() {
+            if ('getCoalescedEvents' in this.nativePointer) {
+                return this.nativePointer.getCoalescedEvents().map(p => new Pointer(p));
             }
+            return [this];
+        }
+    }
+    const isPointerEvent = (event) => self.PointerEvent && event instanceof PointerEvent;
+    const noop = () => { };
+    /**
+     * Track pointers across a particular element
+     */
+    class PointerTracker {
+        /**
+         * Track pointers across a particular element
+         *
+         * @param element Element to monitor.
+         * @param callbacks
+         */
+        constructor(_element, callbacks) {
+            this._element = _element;
+            /**
+             * State of the tracked pointers when they were pressed/touched.
+             */
+            this.startPointers = [];
+            /**
+             * Latest state of the tracked pointers. Contains the same number
+             * of pointers, and in the same order as this.startPointers.
+             */
+            this.currentPointers = [];
+            const { start = () => true, move = noop, end = noop, } = callbacks;
+            this._startCallback = start;
+            this._moveCallback = move;
+            this._endCallback = end;
+            // Bind methods
+            this._pointerStart = this._pointerStart.bind(this);
+            this._touchStart = this._touchStart.bind(this);
+            this._move = this._move.bind(this);
+            this._triggerPointerEnd = this._triggerPointerEnd.bind(this);
+            this._pointerEnd = this._pointerEnd.bind(this);
+            this._touchEnd = this._touchEnd.bind(this);
+            // Add listeners
+            if (self.PointerEvent) {
+                this._element.addEventListener('pointerdown', this._pointerStart);
+            }
+            else {
+                this._element.addEventListener('mousedown', this._pointerStart);
+                this._element.addEventListener('touchstart', this._touchStart);
+                this._element.addEventListener('touchmove', this._move);
+                this._element.addEventListener('touchend', this._touchEnd);
+            }
+        }
+        /**
+         * Call the start callback for this pointer, and track it if the user wants.
+         *
+         * @param pointer Pointer
+         * @param event Related event
+         * @returns Whether the pointer is being tracked.
+         */
+        _triggerPointerStart(pointer, event) {
+            if (!this._startCallback(pointer, event))
+                return false;
+            this.currentPointers.push(pointer);
+            this.startPointers.push(pointer);
+            return true;
+        }
+        /**
+         * Listener for mouse/pointer starts. Bound to the class in the constructor.
+         *
+         * @param event This will only be a MouseEvent if the browser doesn't support
+         * pointer events.
+         */
+        _pointerStart(event) {
+            if (event.button !== 0 /* Left */)
+                return;
+            if (!this._triggerPointerStart(new Pointer(event), event))
+                return;
+            // Add listeners for additional events.
+            // The listeners may already exist, but no harm in adding them again.
+            if (isPointerEvent(event)) {
+                this._element.setPointerCapture(event.pointerId);
+                this._element.addEventListener('pointermove', this._move);
+                this._element.addEventListener('pointerup', this._pointerEnd);
+            }
+            else { // MouseEvent
+                window.addEventListener('mousemove', this._move);
+                window.addEventListener('mouseup', this._pointerEnd);
+            }
+        }
+        /**
+         * Listener for touchstart. Bound to the class in the constructor.
+         * Only used if the browser doesn't support pointer events.
+         */
+        _touchStart(event) {
+            for (const touch of Array.from(event.changedTouches)) {
+                this._triggerPointerStart(new Pointer(touch), event);
+            }
+        }
+        /**
+         * Listener for pointer/mouse/touch move events.
+         * Bound to the class in the constructor.
+         */
+        _move(event) {
+            const previousPointers = this.currentPointers.slice();
+            const changedPointers = ('changedTouches' in event) ? // Shortcut for 'is touch event'.
+                Array.from(event.changedTouches).map(t => new Pointer(t)) :
+                [new Pointer(event)];
+            const trackedChangedPointers = [];
+            for (const pointer of changedPointers) {
+                const index = this.currentPointers.findIndex(p => p.id === pointer.id);
+                if (index === -1)
+                    continue; // Not a pointer we're tracking
+                trackedChangedPointers.push(pointer);
+                this.currentPointers[index] = pointer;
+            }
+            if (trackedChangedPointers.length === 0)
+                return;
+            this._moveCallback(previousPointers, trackedChangedPointers, event);
+        }
+        /**
+         * Call the end callback for this pointer.
+         *
+         * @param pointer Pointer
+         * @param event Related event
+         */
+        _triggerPointerEnd(pointer, event) {
+            const index = this.currentPointers.findIndex(p => p.id === pointer.id);
+            // Not a pointer we're interested in?
+            if (index === -1)
+                return false;
+            this.currentPointers.splice(index, 1);
+            this.startPointers.splice(index, 1);
+            this._endCallback(pointer, event);
+            return true;
+        }
+        /**
+         * Listener for mouse/pointer ends. Bound to the class in the constructor.
+         * @param event This will only be a MouseEvent if the browser doesn't support
+         * pointer events.
+         */
+        _pointerEnd(event) {
+            if (!this._triggerPointerEnd(new Pointer(event), event))
+                return;
+            if (isPointerEvent(event)) {
+                if (this.currentPointers.length)
+                    return;
+                this._element.removeEventListener('pointermove', this._move);
+                this._element.removeEventListener('pointerup', this._pointerEnd);
+            }
+            else { // MouseEvent
+                window.removeEventListener('mousemove', this._move);
+                window.removeEventListener('mouseup', this._pointerEnd);
+            }
+        }
+        /**
+         * Listener for touchend. Bound to the class in the constructor.
+         * Only used if the browser doesn't support pointer events.
+         */
+        _touchEnd(event) {
+            for (const touch of Array.from(event.changedTouches)) {
+                this._triggerPointerEnd(new Pointer(touch), event);
+            }
+        }
+    }
 
-            this.enable();
-        },
-            sum = function sum(a, b) {
-            return a + b;
-        },
-            isCloseTo = function isCloseTo(value, expected) {
-            return value > expected - 0.01 && value < expected + 0.01;
+    function styleInject(css, ref) {
+      if ( ref === void 0 ) ref = {};
+      var insertAt = ref.insertAt;
+
+      if (!css || typeof document === 'undefined') { return; }
+
+      var head = document.head || document.getElementsByTagName('head')[0];
+      var style = document.createElement('style');
+      style.type = 'text/css';
+
+      if (insertAt === 'top') {
+        if (head.firstChild) {
+          head.insertBefore(style, head.firstChild);
+        } else {
+          head.appendChild(style);
+        }
+      } else {
+        head.appendChild(style);
+      }
+
+      if (style.styleSheet) {
+        style.styleSheet.cssText = css;
+      } else {
+        style.appendChild(document.createTextNode(css));
+      }
+    }
+
+    var css = "pinch-zoom {\n  display: block;\n  overflow: hidden;\n  touch-action: none;\n  --scale: 1;\n  --x: 0;\n  --y: 0;\n}\n\npinch-zoom > * {\n  transform: translate(var(--x), var(--y)) scale(var(--scale));\n  transform-origin: 0 0;\n  will-change: transform;\n}\n";
+    styleInject(css);
+
+    const minScaleAttr = 'min-scale';
+    function getDistance(a, b) {
+        if (!b)
+            return 0;
+        return Math.sqrt((b.clientX - a.clientX) ** 2 + (b.clientY - a.clientY) ** 2);
+    }
+    function getMidpoint(a, b) {
+        if (!b)
+            return a;
+        return {
+            clientX: (a.clientX + b.clientX) / 2,
+            clientY: (a.clientY + b.clientY) / 2,
         };
-
-        PinchZoom.prototype = {
-
-            defaults: {
-                tapZoomFactor: 2,
-                zoomOutFactor: 1.3,
-                animationDuration: 300,
-                maxZoom: 4,
-                minZoom: 0.5,
-                draggableUnzoomed: true,
-                lockDragAxis: false,
-                use2d: true,
-                zoomStartEventName: 'pz_zoomstart',
-                zoomUpdateEventName: 'pz_zoomupdate',
-                zoomEndEventName: 'pz_zoomend',
-                dragStartEventName: 'pz_dragstart',
-                dragUpdateEventName: 'pz_dragupdate',
-                dragEndEventName: 'pz_dragend',
-                doubleTapEventName: 'pz_doubletap',
-                verticalPadding: 0,
-                horizontalPadding: 0
-            },
-
-            /**
-             * Event handler for 'dragstart'
-             * @param event
-             */
-            handleDragStart: function handleDragStart(event) {
-                triggerEvent(this.el, this.options.dragStartEventName);
-                this.stopAnimation();
-                this.lastDragPosition = false;
-                this.hasInteraction = true;
-                this.handleDrag(event);
-            },
-
-            /**
-             * Event handler for 'drag'
-             * @param event
-             */
-            handleDrag: function handleDrag(event) {
-                var touch = this.getTouches(event)[0];
-                this.drag(touch, this.lastDragPosition);
-                this.offset = this.sanitizeOffset(this.offset);
-                this.lastDragPosition = touch;
-            },
-
-            handleDragEnd: function handleDragEnd() {
-                triggerEvent(this.el, this.options.dragEndEventName);
-                this.end();
-            },
-
-            /**
-             * Event handler for 'zoomstart'
-             * @param event
-             */
-            handleZoomStart: function handleZoomStart(event) {
-                triggerEvent(this.el, this.options.zoomStartEventName);
-                this.stopAnimation();
-                this.lastScale = 1;
-                this.nthZoom = 0;
-                this.lastZoomCenter = false;
-                this.hasInteraction = true;
-            },
-
-            /**
-             * Event handler for 'zoom'
-             * @param event
-             */
-            handleZoom: function handleZoom(event, newScale) {
-                // a relative scale factor is used
-                var touchCenter = this.getTouchCenter(this.getTouches(event)),
-                    scale = newScale / this.lastScale;
-                this.lastScale = newScale;
-
-                // the first touch events are thrown away since they are not precise
-                this.nthZoom += 1;
-                if (this.nthZoom > 3) {
-
-                    this.scale(scale, touchCenter);
-                    this.drag(touchCenter, this.lastZoomCenter);
-                }
-                this.lastZoomCenter = touchCenter;
-            },
-
-            handleZoomEnd: function handleZoomEnd() {
-                triggerEvent(this.el, this.options.zoomEndEventName);
-                this.end();
-            },
-
-            /**
-             * Event handler for 'doubletap'
-             * @param event
-             */
-            handleDoubleTap: function handleDoubleTap(event) {
-                var center = this.getTouches(event)[0],
-                    zoomFactor = this.zoomFactor > 1 ? 1 : this.options.tapZoomFactor,
-                    startZoomFactor = this.zoomFactor,
-                    updateProgress = function (progress) {
-                    this.scaleTo(startZoomFactor + progress * (zoomFactor - startZoomFactor), center);
-                }.bind(this);
-
-                if (this.hasInteraction) {
-                    return;
-                }
-
-                this.isDoubleTap = true;
-
-                if (startZoomFactor > zoomFactor) {
-                    center = this.getCurrentZoomCenter();
-                }
-
-                this.animate(this.options.animationDuration, updateProgress, this.swing);
-                triggerEvent(this.el, this.options.doubleTapEventName);
-            },
-
-            /**
-             * Compute the initial offset
-             *
-             * the element should be centered in the container upon initialization
-             */
-            computeInitialOffset: function computeInitialOffset() {
-                this.initialOffset = {
-                    x: -Math.abs(this.el.offsetWidth * this.getInitialZoomFactor() - this.container.offsetWidth) / 2,
-                    y: -Math.abs(this.el.offsetHeight * this.getInitialZoomFactor() - this.container.offsetHeight) / 2
-                };
-            },
-
-            /**
-             * Determine if image is loaded
-             */
-            isImageLoaded: function isImageLoaded(el) {
-                if (el.nodeName === 'IMG') {
-                    return el.complete && el.naturalHeight !== 0;
-                } else {
-                    return Array.from(el.querySelectorAll('img')).every(this.isImageLoaded);
-                }
-            },
-
-            setupInitialOffset: function setupInitialOffset() {
-                if (this._initialOffsetSetup) {
-                    return;
-                }
-
-                this._initialOffsetSetup = true;
-
-                this.computeInitialOffset();
-                this.offset.x = this.initialOffset.x;
-                this.offset.y = this.initialOffset.y;
-            },
-
-            /**
-             * Max / min values for the offset
-             * @param offset
-             * @return {Object} the sanitized offset
-             */
-            sanitizeOffset: function sanitizeOffset(offset) {
-                var elWidth = this.el.offsetWidth * this.getInitialZoomFactor() * this.zoomFactor;
-                var elHeight = this.el.offsetHeight * this.getInitialZoomFactor() * this.zoomFactor;
-                var maxX = elWidth - this.getContainerX() + this.options.horizontalPadding,
-                    maxY = elHeight - this.getContainerY() + this.options.verticalPadding,
-                    maxOffsetX = Math.max(maxX, 0),
-                    maxOffsetY = Math.max(maxY, 0),
-                    minOffsetX = Math.min(maxX, 0) - this.options.horizontalPadding,
-                    minOffsetY = Math.min(maxY, 0) - this.options.verticalPadding;
-
-                return {
-                    x: Math.min(Math.max(offset.x, minOffsetX), maxOffsetX),
-                    y: Math.min(Math.max(offset.y, minOffsetY), maxOffsetY)
-                };
-            },
-
-            /**
-             * Scale to a specific zoom factor (not relative)
-             * @param zoomFactor
-             * @param center
-             */
-            scaleTo: function scaleTo(zoomFactor, center) {
-                this.scale(zoomFactor / this.zoomFactor, center);
-            },
-
-            /**
-             * Scales the element from specified center
-             * @param scale
-             * @param center
-             */
-            scale: function scale(_scale, center) {
-                _scale = this.scaleZoomFactor(_scale);
-                this.addOffset({
-                    x: (_scale - 1) * (center.x + this.offset.x),
-                    y: (_scale - 1) * (center.y + this.offset.y)
-                });
-                triggerEvent(this.el, this.options.zoomUpdateEventName);
-            },
-
-            /**
-             * Scales the zoom factor relative to current state
-             * @param scale
-             * @return the actual scale (can differ because of max min zoom factor)
-             */
-            scaleZoomFactor: function scaleZoomFactor(scale) {
-                var originalZoomFactor = this.zoomFactor;
-                this.zoomFactor *= scale;
-                this.zoomFactor = Math.min(this.options.maxZoom, Math.max(this.zoomFactor, this.options.minZoom));
-                return this.zoomFactor / originalZoomFactor;
-            },
-
-            /**
-             * Determine if the image is in a draggable state
-             *
-             * When the image can be dragged, the drag event is acted upon and cancelled.
-             * When not draggable, the drag event bubbles through this component.
-             *
-             * @return {Boolean}
-             */
-            canDrag: function canDrag() {
-                return this.options.draggableUnzoomed || !isCloseTo(this.zoomFactor, 1);
-            },
-
-            /**
-             * Drags the element
-             * @param center
-             * @param lastCenter
-             */
-            drag: function drag(center, lastCenter) {
-                if (lastCenter) {
-                    if (this.options.lockDragAxis) {
-                        // lock scroll to position that was changed the most
-                        if (Math.abs(center.x - lastCenter.x) > Math.abs(center.y - lastCenter.y)) {
-                            this.addOffset({
-                                x: -(center.x - lastCenter.x),
-                                y: 0
-                            });
-                        } else {
-                            this.addOffset({
-                                y: -(center.y - lastCenter.y),
-                                x: 0
-                            });
-                        }
-                    } else {
-                        this.addOffset({
-                            y: -(center.y - lastCenter.y),
-                            x: -(center.x - lastCenter.x)
-                        });
-                    }
-                    triggerEvent(this.el, this.options.dragUpdateEventName);
-                }
-            },
-
-            /**
-             * Calculates the touch center of multiple touches
-             * @param touches
-             * @return {Object}
-             */
-            getTouchCenter: function getTouchCenter(touches) {
-                return this.getVectorAvg(touches);
-            },
-
-            /**
-             * Calculates the average of multiple vectors (x, y values)
-             */
-            getVectorAvg: function getVectorAvg(vectors) {
-                return {
-                    x: vectors.map(function (v) {
-                        return v.x;
-                    }).reduce(sum) / vectors.length,
-                    y: vectors.map(function (v) {
-                        return v.y;
-                    }).reduce(sum) / vectors.length
-                };
-            },
-
-            /**
-             * Adds an offset
-             * @param offset the offset to add
-             * @return return true when the offset change was accepted
-             */
-            addOffset: function addOffset(offset) {
-                this.offset = {
-                    x: this.offset.x + offset.x,
-                    y: this.offset.y + offset.y
-                };
-            },
-
-            sanitize: function sanitize() {
-                if (this.zoomFactor < this.options.zoomOutFactor) {
-                    this.zoomOutAnimation();
-                } else if (this.isInsaneOffset(this.offset)) {
-                    this.sanitizeOffsetAnimation();
-                }
-            },
-
-            /**
-             * Checks if the offset is ok with the current zoom factor
-             * @param offset
-             * @return {Boolean}
-             */
-            isInsaneOffset: function isInsaneOffset(offset) {
-                var sanitizedOffset = this.sanitizeOffset(offset);
-                return sanitizedOffset.x !== offset.x || sanitizedOffset.y !== offset.y;
-            },
-
-            /**
-             * Creates an animation moving to a sane offset
-             */
-            sanitizeOffsetAnimation: function sanitizeOffsetAnimation() {
-                var targetOffset = this.sanitizeOffset(this.offset),
-                    startOffset = {
-                    x: this.offset.x,
-                    y: this.offset.y
+    }
+    function getAbsoluteValue(value, max) {
+        if (typeof value === 'number')
+            return value;
+        if (value.trimRight().endsWith('%')) {
+            return max * parseFloat(value) / 100;
+        }
+        return parseFloat(value);
+    }
+    // I'd rather use DOMMatrix/DOMPoint here, but the browser support isn't good enough.
+    // Given that, better to use something everything supports.
+    let cachedSvg;
+    function getSVG() {
+        return cachedSvg || (cachedSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'));
+    }
+    function createMatrix() {
+        return getSVG().createSVGMatrix();
+    }
+    function createPoint() {
+        return getSVG().createSVGPoint();
+    }
+    const MIN_SCALE = 0.01;
+    class PinchZoom extends HTMLElement {
+        constructor() {
+            super();
+            // Current transform.
+            this._transform = createMatrix();
+            // Watch for children changes.
+            // Note this won't fire for initial contents,
+            // so _stageElChange is also called in connectedCallback.
+            new MutationObserver(() => this._stageElChange())
+                .observe(this, { childList: true });
+            // Watch for pointers
+            const pointerTracker = new PointerTracker(this, {
+                start: (pointer, event) => {
+                    // We only want to track 2 pointers at most
+                    if (pointerTracker.currentPointers.length === 2 || !this._positioningEl)
+                        return false;
+                    event.preventDefault();
+                    return true;
                 },
-                    updateProgress = function (progress) {
-                    this.offset.x = startOffset.x + progress * (targetOffset.x - startOffset.x);
-                    this.offset.y = startOffset.y + progress * (targetOffset.y - startOffset.y);
-                    this.update();
-                }.bind(this);
-
-                this.animate(this.options.animationDuration, updateProgress, this.swing);
-            },
-
-            /**
-             * Zooms back to the original position,
-             * (no offset and zoom factor 1)
-             */
-            zoomOutAnimation: function zoomOutAnimation() {
-                if (this.zoomFactor === 1) {
-                    return;
+                move: (previousPointers) => {
+                    this._onPointerMove(previousPointers, pointerTracker.currentPointers);
+                },
+            });
+            this.addEventListener('wheel', event => this._onWheel(event));
+        }
+        static get observedAttributes() { return [minScaleAttr]; }
+        attributeChangedCallback(name, oldValue, newValue) {
+            if (name === minScaleAttr) {
+                if (this.scale < this.minScale) {
+                    this.setTransform({ scale: this.minScale });
                 }
-
-                var startZoomFactor = this.zoomFactor,
-                    zoomFactor = 1,
-                    center = this.getCurrentZoomCenter(),
-                    updateProgress = function (progress) {
-                    this.scaleTo(startZoomFactor + progress * (zoomFactor - startZoomFactor), center);
-                }.bind(this);
-
-                this.animate(this.options.animationDuration, updateProgress, this.swing);
-            },
-
-            /**
-             * Updates the aspect ratio
-             */
-            updateAspectRatio: function updateAspectRatio() {
-                this.setContainerY(this.container.parentElement.offsetHeight);
-            },
-
-            /**
-             * Calculates the initial zoom factor (for the element to fit into the container)
-             * @return {number} the initial zoom factor
-             */
-            getInitialZoomFactor: function getInitialZoomFactor() {
-                var xZoomFactor = this.container.offsetWidth / this.el.offsetWidth;
-                var yZoomFactor = this.container.offsetHeight / this.el.offsetHeight;
-
-                return Math.min(xZoomFactor, yZoomFactor);
-            },
-
-            /**
-             * Calculates the aspect ratio of the element
-             * @return the aspect ratio
-             */
-            getAspectRatio: function getAspectRatio() {
-                return this.el.offsetWidth / this.el.offsetHeight;
-            },
-
-            /**
-             * Calculates the virtual zoom center for the current offset and zoom factor
-             * (used for reverse zoom)
-             * @return {Object} the current zoom center
-             */
-            getCurrentZoomCenter: function getCurrentZoomCenter() {
-                var offsetLeft = this.offset.x - this.initialOffset.x;
-                var centerX = -1 * this.offset.x - offsetLeft / (1 / this.zoomFactor - 1);
-
-                var offsetTop = this.offset.y - this.initialOffset.y;
-                var centerY = -1 * this.offset.y - offsetTop / (1 / this.zoomFactor - 1);
-
-                return {
-                    x: centerX,
-                    y: centerY
-                };
-            },
-
-            /**
-             * Returns the touches of an event relative to the container offset
-             * @param event
-             * @return array touches
-             */
-            getTouches: function getTouches(event) {
-                var rect = this.container.getBoundingClientRect();
-                var scrollTop = document.documentElement.scrollTop || document.body.scrollTop;
-                var scrollLeft = document.documentElement.scrollLeft || document.body.scrollLeft;
-                var posTop = rect.top + scrollTop;
-                var posLeft = rect.left + scrollLeft;
-
-                return Array.prototype.slice.call(event.touches).map(function (touch) {
-                    return {
-                        x: touch.pageX - posLeft,
-                        y: touch.pageY - posTop
-                    };
-                });
-            },
-
-            /**
-             * Animation loop
-             * does not support simultaneous animations
-             * @param duration
-             * @param framefn
-             * @param timefn
-             * @param callback
-             */
-            animate: function animate(duration, framefn, timefn, callback) {
-                var startTime = new Date().getTime(),
-                    renderFrame = function () {
-                    if (!this.inAnimation) {
-                        return;
-                    }
-                    var frameTime = new Date().getTime() - startTime,
-                        progress = frameTime / duration;
-                    if (frameTime >= duration) {
-                        framefn(1);
-                        if (callback) {
-                            callback();
-                        }
-                        this.update();
-                        this.stopAnimation();
-                        this.update();
-                    } else {
-                        if (timefn) {
-                            progress = timefn(progress);
-                        }
-                        framefn(progress);
-                        this.update();
-                        requestAnimationFrame(renderFrame);
-                    }
-                }.bind(this);
-                this.inAnimation = true;
-                requestAnimationFrame(renderFrame);
-            },
-
-            /**
-             * Stops the animation
-             */
-            stopAnimation: function stopAnimation() {
-                this.inAnimation = false;
-            },
-
-            /**
-             * Swing timing function for animations
-             * @param p
-             * @return {Number}
-             */
-            swing: function swing(p) {
-                return -Math.cos(p * Math.PI) / 2 + 0.5;
-            },
-
-            getContainerX: function getContainerX() {
-                return this.container.offsetWidth;
-            },
-
-            getContainerY: function getContainerY() {
-                return this.container.offsetHeight;
-            },
-
-            setContainerY: function setContainerY(y) {
-                return this.container.style.height = y + 'px';
-            },
-
-            /**
-             * Creates the expected html structure
-             */
-            setupMarkup: function setupMarkup() {
-                this.container = buildElement('<div class="pinch-zoom-container"></div>');
-                this.el.parentNode.insertBefore(this.container, this.el);
-                this.container.appendChild(this.el);
-
-                this.container.style.overflow = 'hidden';
-                this.container.style.position = 'relative';
-
-                this.el.style.webkitTransformOrigin = '0% 0%';
-                this.el.style.mozTransformOrigin = '0% 0%';
-                this.el.style.msTransformOrigin = '0% 0%';
-                this.el.style.oTransformOrigin = '0% 0%';
-                this.el.style.transformOrigin = '0% 0%';
-
-                this.el.style.position = 'absolute';
-            },
-
-            end: function end() {
-                this.hasInteraction = false;
-                this.sanitize();
-                this.update();
-            },
-
-            /**
-             * Binds all required event listeners
-             */
-            bindEvents: function bindEvents() {
-                var self = this;
-                detectGestures(this.container, this);
-
-                window.addEventListener('resize', this.update.bind(this));
-                Array.from(this.el.querySelectorAll('img')).forEach(function (imgEl) {
-                    imgEl.addEventListener('load', self.update.bind(self));
-                });
-
-                if (this.el.nodeName === 'IMG') {
-                    this.el.addEventListener('load', this.update.bind(this));
-                }
-            },
-
-            /**
-             * Updates the css values according to the current zoom factor and offset
-             */
-            update: function update(event) {
-                if (this.updatePlaned) {
-                    return;
-                }
-                this.updatePlaned = true;
-
-                window.setTimeout(function () {
-                    this.updatePlaned = false;
-                    this.updateAspectRatio();
-
-                    if (event && event.type === 'resize') {
-                        this.computeInitialOffset();
-                    }
-
-                    if (event && event.type === 'load') {
-                        this.setupInitialOffset();
-                    }
-
-                    var zoomFactor = this.getInitialZoomFactor() * this.zoomFactor,
-                        offsetX = -this.offset.x / zoomFactor,
-                        offsetY = -this.offset.y / zoomFactor,
-                        transform3d = 'scale3d(' + zoomFactor + ', ' + zoomFactor + ',1) ' + 'translate3d(' + offsetX + 'px,' + offsetY + 'px,0px)',
-                        transform2d = 'scale(' + zoomFactor + ', ' + zoomFactor + ') ' + 'translate(' + offsetX + 'px,' + offsetY + 'px)',
-                        removeClone = function () {
-                        if (this.clone) {
-                            this.clone.parentNode.removeChild(this.clone);
-                            delete this.clone;
-                        }
-                    }.bind(this);
-
-                    // Scale 3d and translate3d are faster (at least on ios)
-                    // but they also reduce the quality.
-                    // PinchZoom uses the 3d transformations during interactions
-                    // after interactions it falls back to 2d transformations
-                    if (!this.options.use2d || this.hasInteraction || this.inAnimation) {
-                        this.is3d = true;
-                        removeClone();
-
-                        this.el.style.webkitTransform = transform3d;
-                        this.el.style.mozTransform = transform2d;
-                        this.el.style.msTransform = transform2d;
-                        this.el.style.oTransform = transform2d;
-                        this.el.style.transform = transform3d;
-                    } else {
-                        // When changing from 3d to 2d transform webkit has some glitches.
-                        // To avoid this, a copy of the 3d transformed element is displayed in the
-                        // foreground while the element is converted from 3d to 2d transform
-                        if (this.is3d) {
-                            this.clone = this.el.cloneNode(true);
-                            this.clone.style.pointerEvents = 'none';
-                            this.container.appendChild(this.clone);
-                            window.setTimeout(removeClone, 200);
-                        }
-
-                        this.el.style.webkitTransform = transform2d;
-                        this.el.style.mozTransform = transform2d;
-                        this.el.style.msTransform = transform2d;
-                        this.el.style.oTransform = transform2d;
-                        this.el.style.transform = transform2d;
-
-                        this.is3d = false;
-                    }
-                }.bind(this), 0);
-            },
-
-            /**
-             * Enables event handling for gestures
-             */
-            enable: function enable() {
-                this.enabled = true;
-            },
-
-            /**
-             * Disables event handling for gestures
-             */
-            disable: function disable() {
-                this.enabled = false;
             }
-        };
-
-        var detectGestures = function detectGestures(el, target) {
-            var interaction = null,
-                fingers = 0,
-                lastTouchStart = null,
-                startTouches = null,
-                setInteraction = function setInteraction(newInteraction, event) {
-                if (interaction !== newInteraction) {
-
-                    if (interaction && !newInteraction) {
-                        switch (interaction) {
-                            case "zoom":
-                                target.handleZoomEnd(event);
-                                break;
-                            case 'drag':
-                                target.handleDragEnd(event);
-                                break;
-                        }
-                    }
-
-                    switch (newInteraction) {
-                        case 'zoom':
-                            target.handleZoomStart(event);
-                            break;
-                        case 'drag':
-                            target.handleDragStart(event);
-                            break;
-                    }
-                }
-                interaction = newInteraction;
-            },
-                updateInteraction = function updateInteraction(event) {
-                if (fingers === 2) {
-                    setInteraction('zoom');
-                } else if (fingers === 1 && target.canDrag()) {
-                    setInteraction('drag', event);
-                } else {
-                    setInteraction(null, event);
-                }
-            },
-                targetTouches = function targetTouches(touches) {
-                return Array.from(touches).map(function (touch) {
-                    return {
-                        x: touch.pageX,
-                        y: touch.pageY
-                    };
-                });
-            },
-                getDistance = function getDistance(a, b) {
-                var x, y;
-                x = a.x - b.x;
-                y = a.y - b.y;
-                return Math.sqrt(x * x + y * y);
-            },
-                calculateScale = function calculateScale(startTouches, endTouches) {
-                var startDistance = getDistance(startTouches[0], startTouches[1]),
-                    endDistance = getDistance(endTouches[0], endTouches[1]);
-                return endDistance / startDistance;
-            },
-                cancelEvent = function cancelEvent(event) {
-                event.stopPropagation();
-                event.preventDefault();
-            },
-                detectDoubleTap = function detectDoubleTap(event) {
-                var time = new Date().getTime();
-
-                if (fingers > 1) {
-                    lastTouchStart = null;
-                }
-
-                if (time - lastTouchStart < 300) {
-                    cancelEvent(event);
-
-                    target.handleDoubleTap(event);
-                    switch (interaction) {
-                        case "zoom":
-                            target.handleZoomEnd(event);
-                            break;
-                        case 'drag':
-                            target.handleDragEnd(event);
-                            break;
-                    }
-                } else {
-                    target.isDoubleTap = false;
-                }
-
-                if (fingers === 1) {
-                    lastTouchStart = time;
-                }
-            },
-                firstMove = true;
-
-            el.addEventListener('touchstart', function (event) {
-                if (target.enabled) {
-                    firstMove = true;
-                    fingers = event.touches.length;
-                    detectDoubleTap(event);
-                }
+        }
+        get minScale() {
+            const attrValue = this.getAttribute(minScaleAttr);
+            if (!attrValue)
+                return MIN_SCALE;
+            const value = parseFloat(attrValue);
+            if (Number.isFinite(value))
+                return Math.max(MIN_SCALE, value);
+            return MIN_SCALE;
+        }
+        set minScale(value) {
+            this.setAttribute(minScaleAttr, String(value));
+        }
+        connectedCallback() {
+            this._stageElChange();
+        }
+        get x() {
+            return this._transform.e;
+        }
+        get y() {
+            return this._transform.f;
+        }
+        get scale() {
+            return this._transform.a;
+        }
+        /**
+         * Change the scale, adjusting x/y by a given transform origin.
+         */
+        scaleTo(scale, opts = {}) {
+            let { originX = 0, originY = 0, } = opts;
+            const { relativeTo = 'content', allowChangeEvent = false, } = opts;
+            const relativeToEl = (relativeTo === 'content' ? this._positioningEl : this);
+            // No content element? Fall back to just setting scale
+            if (!relativeToEl || !this._positioningEl) {
+                this.setTransform({ scale, allowChangeEvent });
+                return;
+            }
+            const rect = relativeToEl.getBoundingClientRect();
+            originX = getAbsoluteValue(originX, rect.width);
+            originY = getAbsoluteValue(originY, rect.height);
+            if (relativeTo === 'content') {
+                originX += this.x;
+                originY += this.y;
+            }
+            else {
+                const currentRect = this._positioningEl.getBoundingClientRect();
+                originX -= currentRect.left;
+                originY -= currentRect.top;
+            }
+            this._applyChange({
+                allowChangeEvent,
+                originX,
+                originY,
+                scaleDiff: scale / this.scale,
             });
-
-            el.addEventListener('touchmove', function (event) {
-                if (target.enabled && !target.isDoubleTap) {
-                    if (firstMove) {
-                        updateInteraction(event);
-                        if (interaction) {
-                            cancelEvent(event);
-                        }
-                        startTouches = targetTouches(event.touches);
-                    } else {
-                        switch (interaction) {
-                            case 'zoom':
-                                target.handleZoom(event, calculateScale(startTouches, targetTouches(event.touches)));
-                                break;
-                            case 'drag':
-                                target.handleDrag(event);
-                                break;
-                        }
-                        if (interaction) {
-                            cancelEvent(event);
-                            target.update();
-                        }
-                    }
-
-                    firstMove = false;
-                }
+        }
+        /**
+         * Update the stage with a given scale/x/y.
+         */
+        setTransform(opts = {}) {
+            const { scale = this.scale, allowChangeEvent = false, } = opts;
+            let { x = this.x, y = this.y, } = opts;
+            // If we don't have an element to position, just set the value as given.
+            // We'll check bounds later.
+            if (!this._positioningEl) {
+                this._updateTransform(scale, x, y, allowChangeEvent);
+                return;
+            }
+            // Get current layout
+            const thisBounds = this.getBoundingClientRect();
+            const positioningElBounds = this._positioningEl.getBoundingClientRect();
+            // Not displayed. May be disconnected or display:none.
+            // Just take the values, and we'll check bounds later.
+            if (!thisBounds.width || !thisBounds.height) {
+                this._updateTransform(scale, x, y, allowChangeEvent);
+                return;
+            }
+            // Create points for _positioningEl.
+            let topLeft = createPoint();
+            topLeft.x = positioningElBounds.left - thisBounds.left;
+            topLeft.y = positioningElBounds.top - thisBounds.top;
+            let bottomRight = createPoint();
+            bottomRight.x = positioningElBounds.width + topLeft.x;
+            bottomRight.y = positioningElBounds.height + topLeft.y;
+            // Calculate the intended position of _positioningEl.
+            const matrix = createMatrix()
+                .translate(x, y)
+                .scale(scale)
+                // Undo current transform
+                .multiply(this._transform.inverse());
+            topLeft = topLeft.matrixTransform(matrix);
+            bottomRight = bottomRight.matrixTransform(matrix);
+            // Ensure _positioningEl can't move beyond out-of-bounds.
+            // Correct for x
+            if (topLeft.x > thisBounds.width) {
+                x += thisBounds.width - topLeft.x;
+            }
+            else if (bottomRight.x < 0) {
+                x += -bottomRight.x;
+            }
+            // Correct for y
+            if (topLeft.y > thisBounds.height) {
+                y += thisBounds.height - topLeft.y;
+            }
+            else if (bottomRight.y < 0) {
+                y += -bottomRight.y;
+            }
+            this._updateTransform(scale, x, y, allowChangeEvent);
+        }
+        /**
+         * Update transform values without checking bounds. This is only called in setTransform.
+         */
+        _updateTransform(scale, x, y, allowChangeEvent) {
+            // Avoid scaling to zero
+            if (scale < this.minScale)
+                return;
+            // Return if there's no change
+            if (scale === this.scale &&
+                x === this.x &&
+                y === this.y)
+                return;
+            this._transform.e = x;
+            this._transform.f = y;
+            this._transform.d = this._transform.a = scale;
+            this.style.setProperty('--x', this.x + 'px');
+            this.style.setProperty('--y', this.y + 'px');
+            this.style.setProperty('--scale', this.scale + '');
+            if (allowChangeEvent) {
+                const event = new Event('change', { bubbles: true });
+                this.dispatchEvent(event);
+            }
+        }
+        /**
+         * Called when the direct children of this element change.
+         * Until we have have shadow dom support across the board, we
+         * require a single element to be the child of <pinch-zoom>, and
+         * that's the element we pan/scale.
+         */
+        _stageElChange() {
+            this._positioningEl = undefined;
+            if (this.children.length === 0)
+                return;
+            this._positioningEl = this.children[0];
+            if (this.children.length > 1) {
+                console.warn('<pinch-zoom> must not have more than one child.');
+            }
+            // Do a bounds check
+            this.setTransform({ allowChangeEvent: true });
+        }
+        _onWheel(event) {
+            if (!this._positioningEl)
+                return;
+            event.preventDefault();
+            const currentRect = this._positioningEl.getBoundingClientRect();
+            let { deltaY } = event;
+            const { ctrlKey, deltaMode } = event;
+            if (deltaMode === 1) { // 1 is "lines", 0 is "pixels"
+                // Firefox uses "lines" for some types of mouse
+                deltaY *= 15;
+            }
+            // ctrlKey is true when pinch-zooming on a trackpad.
+            const divisor = ctrlKey ? 100 : 300;
+            const scaleDiff = 1 - deltaY / divisor;
+            this._applyChange({
+                scaleDiff,
+                originX: event.clientX - currentRect.left,
+                originY: event.clientY - currentRect.top,
+                allowChangeEvent: true,
             });
-
-            el.addEventListener('touchend', function (event) {
-                if (target.enabled) {
-                    fingers = event.touches.length;
-                    updateInteraction(event);
-                }
+        }
+        _onPointerMove(previousPointers, currentPointers) {
+            if (!this._positioningEl)
+                return;
+            // Combine next points with previous points
+            const currentRect = this._positioningEl.getBoundingClientRect();
+            // For calculating panning movement
+            const prevMidpoint = getMidpoint(previousPointers[0], previousPointers[1]);
+            const newMidpoint = getMidpoint(currentPointers[0], currentPointers[1]);
+            // Midpoint within the element
+            const originX = prevMidpoint.clientX - currentRect.left;
+            const originY = prevMidpoint.clientY - currentRect.top;
+            // Calculate the desired change in scale
+            const prevDistance = getDistance(previousPointers[0], previousPointers[1]);
+            const newDistance = getDistance(currentPointers[0], currentPointers[1]);
+            const scaleDiff = prevDistance ? newDistance / prevDistance : 1;
+            this._applyChange({
+                originX, originY, scaleDiff,
+                panX: newMidpoint.clientX - prevMidpoint.clientX,
+                panY: newMidpoint.clientY - prevMidpoint.clientY,
+                allowChangeEvent: true,
             });
-        };
+        }
+        /** Transform the view & fire a change event */
+        _applyChange(opts = {}) {
+            const { panX = 0, panY = 0, originX = 0, originY = 0, scaleDiff = 1, allowChangeEvent = false, } = opts;
+            const matrix = createMatrix()
+                // Translate according to panning.
+                .translate(panX, panY)
+                // Scale about the origin.
+                .translate(originX, originY)
+                // Apply current translate
+                .translate(this.x, this.y)
+                .scale(scaleDiff)
+                .translate(-originX, -originY)
+                // Apply current scale.
+                .scale(this.scale);
+            // Convert the transform into basic translate & scale.
+            this.setTransform({
+                allowChangeEvent,
+                scale: matrix.a,
+                x: matrix.e,
+                y: matrix.f,
+            });
+        }
+    }
 
-        return PinchZoom;
-    };
+    customElements.define('pinch-zoom', PinchZoom);
 
-    var PinchZoom = definePinchZoom();
+    return PinchZoom;
 
-    exports.default = PinchZoom;
-});
+}());

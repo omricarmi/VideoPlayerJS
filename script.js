@@ -6,7 +6,7 @@
     var canvas = document.getElementById('canvas');
     var ctx = canvas.getContext('2d');
     var video = document.getElementById('video');
-      ctx.scale(0.3,0.3);
+      // ctx.scale(0.3,0.3);
 
     video.addEventListener('play', function() {
   var $this = this; //cache
