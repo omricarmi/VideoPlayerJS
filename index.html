@@ -1,0 +1,39 @@
+ <html>
+
+  <script  src="http://ajax.googleapis.com/ajax/libs/jquery/1/jquery.min.js"></script>
+
+
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+
+    <script type="text/javascript" src="./pinch-zoom.js"></script>
+
+  <div id="theater">
+  	<video id="video" hidden src="https://upload.wikimedia.org/wikipedia/commons/transcoded/c/c0/Big_Buck_Bunny_4K.webm/Big_Buck_Bunny_4K.webm.480p.vp9.webm" controls></video>
+  	<br/>
+  	    <div class="page pinch-zoom-parent">
+
+  	<canvas id="canvas" class="pinch-zoom"></canvas>
+  	    </div>
+
+  	</div>
+
+  	<div id="my-controls" onclick="updateSpeed()">
+  		<input  type="radio" id="double" name="speed" value="2.0">
+  		<label for="double">x2</label><br>
+  		<input type="radio" id="normal" name="speed" value="1.0" checked>
+  		<label for="normal">x1</label><br>
+  		<input type="radio" id="half" name="speed" value="0.5" >
+  		<label for="half">x0.5</label>
+  	</div>
+
+  	<button onclick="togglePlayback()">Play/Pause</button>
+
+
+  <script src="./script.js"></script>
+
+ <!-- <script type="text/javascript">
+      var el = document.querySelector('div.pinch-zoom');
+      new PinchZoom.default(el, {});
+    </script> -->
+  	</html>
